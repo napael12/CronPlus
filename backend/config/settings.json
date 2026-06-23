@@ -1,0 +1,38 @@
+[
+  {
+    "key": "notification_mailhost",
+    "label": "Notification mailhost:port",
+    "description": "SMTP host:port for sending Workflow/Step Notifications",
+    "default": "smtp.mailhost:25"
+  },
+  {
+    "key": "notification_sender",
+    "label": "Notification Sender",
+    "description": "'FROM' email address for notifications",
+    "default": "admin@cronpl.us.com"
+  },
+  {
+    "key": "notification_mailhost_user",
+    "label": "Mailhost User",
+    "description": "SMTP authentication username for notification emails",
+    "default": ""
+  },
+  {
+    "key": "notification_mailhost_password",
+    "label": "Mailhost Password",
+    "description": "SMTP authentication password for notification emails",
+    "default": ""
+  },
+  {
+    "key": "default_timeout",
+    "label": "Default Timeout (seconds)",
+    "description": "Default timeout for individual Step Executions",
+    "default": "600"
+  },
+  {
+    "key": "log_retention_days",
+    "label": "Retain Logs (days)",
+    "description": "How long to keep Workflow/Step Runtime Logs",
+    "default": "30"
+  }
+]
