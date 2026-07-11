@@ -128,6 +128,7 @@ export interface StepRun {
   peak_memory_mb: number | null;
   truncated: boolean;
   duration_seconds: number | null;
+  output_vars: Record<string, string>;
 }
 
 export interface WorkflowRun {

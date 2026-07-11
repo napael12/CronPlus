@@ -34,6 +34,7 @@ export function StatusBadge({ status }: { status: string }) {
     pending: "secondary",
     failed: "destructive",
     timeout: "destructive",
+    stopped: "warning",
     skipped: "outline",
   };
   return <Badge variant={map[status] ?? "outline"}>{status}</Badge>;

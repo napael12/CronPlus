@@ -26,7 +26,9 @@ function VariableForm({
       <div className="space-y-1">
         <Label>Name</Label>
         <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="my_variable" />
-        <p className="text-xs text-muted-foreground">Use in configs as {"{my_variable}"}</p>
+        <p className="text-xs text-muted-foreground">
+          Use in configs as <code>{"{my_variable}"}</code>. System environment variables are built-in: <code>{"{env.PATH}"}</code>, <code>{"{env.USERNAME}"}</code>, etc.
+        </p>
       </div>
       <div className="space-y-1">
         <Label>Expression</Label>

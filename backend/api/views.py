@@ -392,6 +392,7 @@ class WorkflowRunViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        from django.db.models import Q
         qs = WorkflowRun.objects.select_related("workflow__project", "triggered_by").prefetch_related("step_runs").order_by("-started_at")
         workflow_id = self.request.query_params.get("workflow")
         if workflow_id:
@@ -399,6 +400,22 @@ class WorkflowRunViewSet(viewsets.ReadOnlyModelViewSet):
         status_filter = self.request.query_params.get("status")
         if status_filter:
             qs = qs.filter(status=status_filter)
+        project_filter = self.request.query_params.get("project")
+        if project_filter:
+            qs = qs.filter(workflow__project__name__icontains=project_filter)
+        workflow_name_filter = self.request.query_params.get("workflow_name")
+        if workflow_name_filter:
+            qs = qs.filter(workflow__name__icontains=workflow_name_filter)
+        triggered_by_filter = self.request.query_params.get("triggered_by")
+        if triggered_by_filter:
+            q = (
+                Q(triggered_by__name__icontains=triggered_by_filter) |
+                Q(triggered_by__email__icontains=triggered_by_filter)
+            )
+            # "Scheduler" is the display label for triggered_by_scheduler=True runs
+            if triggered_by_filter.lower() in "scheduler":
+                q |= Q(triggered_by_scheduler=True)
+            qs = qs.filter(q)
         return qs
 
     def get_serializer_class(self):
@@ -408,11 +425,20 @@ class WorkflowRunViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsAdminOrOperator])
     def stop(self, request, pk=None):
-        # Mark run as failed; the Huey task checks status and will stop
+        from django.utils import timezone as _tz
         run = self.get_object()
         if run.status == WorkflowRun.Status.RUNNING:
-            run.status = WorkflowRun.Status.FAILED
+            run.status = WorkflowRun.Status.STOPPED
             run.save(update_fields=["status"])
+            # Immediately mark every active step run as stopped so the UI
+            # reflects the cancellation before the executor's polling loop fires.
+            # The executor will overwrite these with accurate stdout/stderr/exit_code
+            # once it kills the process, but the final status will remain STOPPED.
+            StepRun.objects.filter(
+                workflow_run=run,
+                status__in=[StepRun.Status.RUNNING, StepRun.Status.PENDING],
+            ).update(status=StepRun.Status.STOPPED, finished_at=_tz.now())
+            _audit(request, AuditLog.Action.UPDATE, run, detail={"action": "stop"})
         return Response({"detail": "Stop signal sent"})
 
 
@@ -429,6 +455,26 @@ class StepRunViewSet(viewsets.ReadOnlyModelViewSet):
         if step_id:
             qs = qs.filter(step_id=step_id)
         return qs
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated, IsAdminOrOperator])
+    def stop(self, request, pk=None):
+        from django.utils import timezone as _tz
+        step_run = self.get_object()
+        if step_run.status == StepRun.Status.RUNNING:
+            wf_run = step_run.workflow_run
+            if wf_run.status == WorkflowRun.Status.RUNNING:
+                wf_run.status = WorkflowRun.Status.STOPPED
+                wf_run.save(update_fields=["status"])
+                # Immediately mark all active step runs (including this one and
+                # any parallel siblings) as stopped.
+                StepRun.objects.filter(
+                    workflow_run=wf_run,
+                    status__in=[StepRun.Status.RUNNING, StepRun.Status.PENDING],
+                ).update(status=StepRun.Status.STOPPED, finished_at=_tz.now())
+                _audit(request, AuditLog.Action.UPDATE, wf_run,
+                       detail={"action": "stop", "triggered_by_step_run": step_run.pk})
+            _audit(request, AuditLog.Action.UPDATE, step_run, detail={"action": "stop"})
+        return Response({"detail": "Stop signal sent"})
 
 
 # ---------------------------------------------------------------------------

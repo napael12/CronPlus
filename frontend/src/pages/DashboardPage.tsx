@@ -1,8 +1,31 @@
-import { useState, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, useMemo, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronRight, ChevronUp, ChevronsUpDown, RefreshCw, Search, LayoutDashboard } from "lucide-react";
-import api, { DashboardData, WorkflowRun, PaginatedResponse } from "@/lib/api";
+import {
+  createColumnHelper,
+  flexRender,
+  getCoreRowModel,
+  getFilteredRowModel,
+  getSortedRowModel,
+  getPaginationRowModel,
+  useReactTable,
+  type FilterFn,
+  type SortingState,
+  type ColumnFiltersState,
+  type Column,
+} from "@tanstack/react-table";
+import {
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  ChevronsUpDown,
+  RefreshCw,
+  Search,
+  LayoutDashboard,
+  Square,
+  X,
+} from "lucide-react";
+import api, { DashboardData, WorkflowRun, PaginatedResponse, getApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +33,8 @@ import { StatusBadge } from "@/components/ui/badge";
 import { Pagination } from "@/components/ui/pagination";
 import { RunDetailDialog } from "@/components/ui/RunDetailDialog";
 import { useGlobalStatus, useLiveTick } from "@/hooks/useStatusSocket";
+import { useToast } from "@/contexts/ToastContext";
+import { useAuth } from "@/contexts/AuthContext";
 
 const WINDOWS = [
   { label: "30 min", value: 30 },
@@ -18,6 +43,7 @@ const WINDOWS = [
 ];
 
 const PAGE_SIZE = 10;
+const RUN_STATUSES = ["running", "success", "failed", "stopped", "pending", "skipped"];
 
 function formatElapsed(isoDate: string | null | undefined): string {
   if (!isoDate) return "—";
@@ -39,89 +65,83 @@ function formatDuration(seconds: number | null) {
 
 function formatTime(iso: string | null) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleString();
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-// ── Sort ─────────────────────────────────────────────────────────────────────
+// ── TanStack Table filter functions ──────────────────────────────────────────
 
-type SortDir = "asc" | "desc";
-
-interface SortState {
-  key: string;
-  dir: SortDir;
-}
-
-function nextSort(current: SortState, key: string): SortState {
-  if (current.key !== key) return { key, dir: "asc" };
-  return { key, dir: current.dir === "asc" ? "desc" : "asc" };
-}
-
-function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
-  if (!active) return <ChevronsUpDown className="h-3 w-3 ml-1 opacity-40 inline" />;
-  return dir === "asc"
-    ? <ChevronUp className="h-3 w-3 ml-1 inline" />
-    : <ChevronDown className="h-3 w-3 ml-1 inline" />;
-}
-
-function SortableTh({
-  label,
-  sortKey,
-  sort,
-  onSort,
-  className,
-}: {
-  label: string;
-  sortKey: string;
-  sort: SortState;
-  onSort: (key: string) => void;
-  className?: string;
-}) {
+const workflowRunGlobalFilter: FilterFn<WorkflowRun> = (row, _columnId, filterValue: string) => {
+  const r = row.original;
+  const lq = filterValue.toLowerCase();
   return (
-    <th
-      className={`px-4 py-2 font-medium text-left cursor-pointer select-none whitespace-nowrap hover:text-foreground ${className ?? ""}`}
-      onClick={() => onSort(sortKey)}
-    >
-      {label}
-      <SortIcon active={sort.key === sortKey} dir={sort.dir} />
-    </th>
-  );
-}
-
-function sortRuns(runs: WorkflowRun[], sort: SortState): WorkflowRun[] {
-  return [...runs].sort((a, b) => {
-    let va: any;
-    let vb: any;
-    switch (sort.key) {
-      case "id":           va = a.id;                      vb = b.id;                      break;
-      case "workflow":     va = a.workflow_name ?? "";      vb = b.workflow_name ?? "";      break;
-      case "project":      va = a.project_name ?? "";       vb = b.project_name ?? "";       break;
-      case "started_at":   va = a.started_at ?? "";         vb = b.started_at ?? "";         break;
-      case "finished_at":  va = a.finished_at ?? "";        vb = b.finished_at ?? "";        break;
-      case "duration":     va = a.duration_seconds ?? -1;   vb = b.duration_seconds ?? -1;   break;
-      case "triggered_by": va = a.triggered_by_name ?? "";  vb = b.triggered_by_name ?? "";  break;
-      case "status":       va = a.status;                   vb = b.status;                   break;
-      case "step":         va = a.step_name ?? "";           vb = b.step_name ?? "";           break;
-      default:             return 0;
-    }
-    if (va < vb) return sort.dir === "asc" ? -1 : 1;
-    if (va > vb) return sort.dir === "asc" ? 1 : -1;
-    return 0;
-  });
-}
-
-function filterRuns(runs: WorkflowRun[], q: string): WorkflowRun[] {
-  if (!q) return runs;
-  const lq = q.toLowerCase();
-  return runs.filter((r) =>
     String(r.id).includes(lq) ||
     (r.workflow_name ?? "").toLowerCase().includes(lq) ||
     (r.project_name ?? "").toLowerCase().includes(lq) ||
     r.status.toLowerCase().includes(lq) ||
     (r.triggered_by_name ?? "").toLowerCase().includes(lq)
   );
+};
+workflowRunGlobalFilter.autoRemove = (val) => !val;
+
+type ScheduledItem = DashboardData["scheduled"][number];
+
+const schedGlobalFilter: FilterFn<ScheduledItem> = (row, _columnId, filterValue: string) => {
+  const s = row.original;
+  const lq = filterValue.toLowerCase();
+  return s.name.toLowerCase().includes(lq) || s.project_name.toLowerCase().includes(lq);
+};
+schedGlobalFilter.autoRemove = (val) => !val;
+
+const startedAtFilter: FilterFn<WorkflowRun> = (row, columnId, filterValue: string) => {
+  const val = row.getValue<string | null>(columnId);
+  if (!val) return false;
+  return formatTime(val).includes(filterValue);
+};
+startedAtFilter.autoRemove = (val) => !val;
+
+const stepNameFilter: FilterFn<WorkflowRun> = (row, columnId, filterValue: string) => {
+  const val = row.getValue<string | null>(columnId);
+  return (val ?? "").toLowerCase().includes(filterValue.toLowerCase());
+};
+stepNameFilter.autoRemove = (val) => !val;
+
+// ── Column helpers (module-level, typed) ──────────────────────────────────────
+
+const runHelper = createColumnHelper<WorkflowRun>();
+const schedHelper = createColumnHelper<ScheduledItem>();
+
+// ── SortHeader ────────────────────────────────────────────────────────────────
+
+function SortHeader({
+  column,
+  children,
+}: {
+  column: Column<any, unknown>;
+  children: React.ReactNode;
+}) {
+  const sorted = column.getIsSorted();
+  return (
+    <button
+      className="flex items-center gap-1 font-medium cursor-pointer select-none whitespace-nowrap hover:text-foreground text-left"
+      onClick={column.getToggleSortingHandler()}
+    >
+      {children}
+      {sorted === "asc" ? (
+        <ChevronUp className="h-3 w-3 shrink-0" />
+      ) : sorted === "desc" ? (
+        <ChevronDown className="h-3 w-3 shrink-0" />
+      ) : (
+        <ChevronsUpDown className="h-3 w-3 shrink-0 opacity-40" />
+      )}
+    </button>
+  );
 }
 
 const thClass = "px-4 py-2 text-xs text-muted-foreground bg-muted/20 border-b";
+const filterInputClass =
+  "h-6 text-xs px-1.5 w-full rounded border border-input bg-background placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring";
 
 // ── CollapsibleSection ────────────────────────────────────────────────────────
 
@@ -146,9 +166,11 @@ function CollapsibleSection({
           onClick={() => setOpen((o) => !o)}
           className="flex items-center gap-2 font-semibold text-sm text-left"
         >
-          {open
-            ? <ChevronDown className="h-4 w-4 text-muted-foreground" />
-            : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+          {open ? (
+            <ChevronDown className="h-4 w-4 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-4 w-4 text-muted-foreground" />
+          )}
           {title}
           <span className="text-xs font-normal text-muted-foreground">({count})</span>
         </button>
@@ -170,29 +192,570 @@ function CollapsibleSection({
   );
 }
 
-// ── Run History Tab ───────────────────────────────────────────────────────────
+// ── RunningSection ────────────────────────────────────────────────────────────
+
+function RunningSection({
+  runs,
+  canRun,
+  onStop,
+  isPending,
+  onDetail,
+}: {
+  runs: WorkflowRun[];
+  canRun: boolean;
+  onStop: (id: number) => void;
+  isPending: boolean;
+  onDetail: (id: number) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: true }]);
+
+  const columns = useMemo(
+    () => [
+      runHelper.accessor("id", {
+        header: ({ column }) => <SortHeader column={column}>Run</SortHeader>,
+        cell: ({ getValue }) => (
+          <button
+            onClick={() => onDetail(getValue())}
+            className="text-primary hover:underline font-mono text-xs"
+          >
+            #{getValue()}
+          </button>
+        ),
+      }),
+      runHelper.accessor("project_name", {
+        id: "project",
+        header: ({ column }) => <SortHeader column={column}>Project</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+      }),
+      runHelper.accessor("workflow_name", {
+        id: "workflow",
+        header: ({ column }) => <SortHeader column={column}>Workflow</SortHeader>,
+        cell: ({ row, getValue }) => (
+          <span className="text-xs font-medium">{getValue() ?? `#${row.original.workflow}`}</span>
+        ),
+      }),
+      runHelper.accessor("step_name", {
+        id: "step",
+        header: ({ column }) => <SortHeader column={column}>Step</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+      }),
+      runHelper.accessor("started_at", {
+        id: "started_at",
+        header: ({ column }) => <SortHeader column={column}>Started</SortHeader>,
+        cell: ({ getValue }) => <span className="text-xs">{formatTime(getValue())}</span>,
+      }),
+      runHelper.accessor("duration_seconds", {
+        id: "duration",
+        header: ({ column }) => <SortHeader column={column}>Duration</SortHeader>,
+        cell: ({ row }) => (
+          <span className="text-xs font-mono">{formatElapsed(row.original.started_at)}</span>
+        ),
+      }),
+      runHelper.accessor("triggered_by_name", {
+        id: "triggered_by",
+        header: ({ column }) => <SortHeader column={column}>Triggered By</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+      }),
+      runHelper.accessor("status", {
+        header: ({ column }) => <SortHeader column={column}>Status</SortHeader>,
+        cell: ({ getValue }) => <StatusBadge status={getValue()} />,
+      }),
+      ...(canRun
+        ? [
+            runHelper.display({
+              id: "stop",
+              header: () => null,
+              cell: ({ row }) => (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                  disabled={isPending}
+                  onClick={() => {
+                    if (
+                      confirm(
+                        `Stop workflow run #${row.original.id} (${row.original.workflow_name ?? ""})?`
+                      )
+                    )
+                      onStop(row.original.id);
+                  }}
+                >
+                  <Square className="h-3 w-3 mr-1" />Stop
+                </Button>
+              ),
+            }),
+          ]
+        : []),
+    ],
+    [canRun, onStop, isPending, onDetail]
+  );
+
+  const table = useReactTable({
+    data: runs,
+    columns,
+    state: { sorting, globalFilter: filter },
+    onSortingChange: setSorting,
+    globalFilterFn: workflowRunGlobalFilter,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getPaginationRowModel: getPaginationRowModel(),
+    autoResetPageIndex: false,
+    initialState: { pagination: { pageSize: PAGE_SIZE } },
+  });
+
+  const filteredCount = table.getFilteredRowModel().rows.length;
+
+  return (
+    <CollapsibleSection
+      title="Currently Running"
+      count={filteredCount}
+      filter={filter}
+      onFilterChange={(v) => {
+        setFilter(v);
+        table.setPageIndex(0);
+      }}
+    >
+      {filteredCount === 0 ? (
+        <p className="px-4 py-3 text-sm text-muted-foreground">
+          {filter ? "No matches." : "No running workflows."}
+        </p>
+      ) : (
+        <>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={thClass}>
+                {table.getHeaderGroups()[0].headers.map((header) => (
+                  <th key={header.id} className="px-4 py-2 text-left">
+                    {header.isPlaceholder
+                      ? null
+                      : flexRender(header.column.columnDef.header, header.getContext())}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.getPaginationRowModel().rows.map((row, i) => (
+                <tr key={row.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/10"}>
+                  {row.getVisibleCells().map((cell) => (
+                    <td key={cell.id} className="px-4 py-2">
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Pagination
+            page={table.getState().pagination.pageIndex + 1}
+            count={filteredCount}
+            pageSize={PAGE_SIZE}
+            onChange={(p) => table.setPageIndex(p - 1)}
+          />
+        </>
+      )}
+    </CollapsibleSection>
+  );
+}
+
+// ── RecentSection ─────────────────────────────────────────────────────────────
+
+function RecentSection({
+  runs,
+  onDetail,
+}: {
+  runs: WorkflowRun[];
+  onDetail: (id: number) => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [sorting, setSorting] = useState<SortingState>([{ id: "finished_at", desc: true }]);
+
+  const columns = useMemo(
+    () => [
+      runHelper.accessor("id", {
+        header: ({ column }) => <SortHeader column={column}>Run</SortHeader>,
+        cell: ({ getValue }) => (
+          <button
+            onClick={() => onDetail(getValue())}
+            className="text-primary hover:underline font-mono text-xs"
+          >
+            #{getValue()}
+          </button>
+        ),
+      }),
+      runHelper.accessor("project_name", {
+        id: "project",
+        header: ({ column }) => <SortHeader column={column}>Project</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+      }),
+      runHelper.accessor("workflow_name", {
+        id: "workflow",
+        header: ({ column }) => <SortHeader column={column}>Workflow</SortHeader>,
+        cell: ({ row, getValue }) => (
+          <span className="text-xs font-medium">{getValue() ?? `#${row.original.workflow}`}</span>
+        ),
+      }),
+      runHelper.accessor("step_name", {
+        id: "step",
+        header: ({ column }) => <SortHeader column={column}>Step</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+      }),
+      runHelper.accessor("started_at", {
+        id: "started_at",
+        header: ({ column }) => <SortHeader column={column}>Started</SortHeader>,
+        cell: ({ getValue }) => <span className="text-xs">{formatTime(getValue())}</span>,
+      }),
+      runHelper.accessor("finished_at", {
+        id: "finished_at",
+        header: ({ column }) => <SortHeader column={column}>Finished</SortHeader>,
+        cell: ({ getValue }) => <span className="text-xs">{formatTime(getValue())}</span>,
+      }),
+      runHelper.accessor("duration_seconds", {
+        id: "duration",
+        header: ({ column }) => <SortHeader column={column}>Duration</SortHeader>,
+        cell: ({ getValue }) => <span className="text-xs font-mono">{formatDuration(getValue())}</span>,
+      }),
+      runHelper.accessor("triggered_by_name", {
+        id: "triggered_by",
+        header: ({ column }) => <SortHeader column={column}>Triggered By</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+      }),
+      runHelper.accessor("status", {
+        header: ({ column }) => <SortHeader column={column}>Status</SortHeader>,
+        cell: ({ getValue }) => <StatusBadge status={getValue()} />,
+      }),
+    ],
+    [onDetail]
+  );
+
+  const table = useReactTable({
+    data: runs,
+    columns,
+    state: { sorting, globalFilter: filter },
+    onSortingChange: setSorting,
+    globalFilterFn: workflowRunGlobalFilter,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getPaginationRowModel: getPaginationRowModel(),
+    autoResetPageIndex: false,
+    initialState: { pagination: { pageSize: PAGE_SIZE } },
+  });
+
+  const filteredCount = table.getFilteredRowModel().rows.length;
+
+  return (
+    <CollapsibleSection
+      title="Recently Completed"
+      count={filteredCount}
+      filter={filter}
+      onFilterChange={(v) => {
+        setFilter(v);
+        table.setPageIndex(0);
+      }}
+    >
+      {filteredCount === 0 ? (
+        <p className="px-4 py-3 text-sm text-muted-foreground">
+          {filter ? "No matches." : "No recent completions."}
+        </p>
+      ) : (
+        <>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={thClass}>
+                {table.getHeaderGroups()[0].headers.map((header) => (
+                  <th key={header.id} className="px-4 py-2 text-left">
+                    {header.isPlaceholder
+                      ? null
+                      : flexRender(header.column.columnDef.header, header.getContext())}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.getPaginationRowModel().rows.map((row, i) => (
+                <tr key={row.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/10"}>
+                  {row.getVisibleCells().map((cell) => (
+                    <td key={cell.id} className="px-4 py-2">
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Pagination
+            page={table.getState().pagination.pageIndex + 1}
+            count={filteredCount}
+            pageSize={PAGE_SIZE}
+            onChange={(p) => table.setPageIndex(p - 1)}
+          />
+        </>
+      )}
+    </CollapsibleSection>
+  );
+}
+
+// ── ScheduledSection ──────────────────────────────────────────────────────────
+
+function ScheduledSection({ scheduled }: { scheduled: DashboardData["scheduled"] }) {
+  const [filter, setFilter] = useState("");
+  const [sorting, setSorting] = useState<SortingState>([{ id: "next_run", desc: false }]);
+
+  const columns = useMemo(
+    () => [
+      schedHelper.accessor("project_name", {
+        id: "project",
+        header: ({ column }) => <SortHeader column={column}>Project</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue()}</span>
+        ),
+      }),
+      schedHelper.accessor("name", {
+        id: "name",
+        header: ({ column }) => <SortHeader column={column}>Workflow</SortHeader>,
+        cell: ({ getValue }) => (
+          <Link to="/projects" className="text-xs font-medium text-primary hover:underline">
+            {getValue()}
+          </Link>
+        ),
+      }),
+      schedHelper.accessor("next_run", {
+        id: "next_run",
+        header: ({ column }) => <SortHeader column={column}>Next Run</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs font-mono">{new Date(getValue()).toLocaleString()}</span>
+        ),
+      }),
+    ],
+    []
+  );
+
+  const table = useReactTable({
+    data: scheduled,
+    columns,
+    state: { sorting, globalFilter: filter },
+    onSortingChange: setSorting,
+    globalFilterFn: schedGlobalFilter,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    getPaginationRowModel: getPaginationRowModel(),
+    autoResetPageIndex: false,
+    initialState: { pagination: { pageSize: PAGE_SIZE } },
+  });
+
+  const filteredCount = table.getFilteredRowModel().rows.length;
+
+  return (
+    <CollapsibleSection
+      title="Upcoming Scheduled"
+      count={filteredCount}
+      filter={filter}
+      onFilterChange={(v) => {
+        setFilter(v);
+        table.setPageIndex(0);
+      }}
+    >
+      {filteredCount === 0 ? (
+        <p className="px-4 py-3 text-sm text-muted-foreground">
+          {filter ? "No matches." : "No upcoming scheduled runs."}
+        </p>
+      ) : (
+        <>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={thClass}>
+                {table.getHeaderGroups()[0].headers.map((header) => (
+                  <th key={header.id} className="px-4 py-2 text-left">
+                    {header.isPlaceholder
+                      ? null
+                      : flexRender(header.column.columnDef.header, header.getContext())}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.getPaginationRowModel().rows.map((row, i) => (
+                <tr key={row.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/10"}>
+                  {row.getVisibleCells().map((cell) => (
+                    <td key={cell.id} className="px-4 py-2">
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Pagination
+            page={table.getState().pagination.pageIndex + 1}
+            count={filteredCount}
+            pageSize={PAGE_SIZE}
+            onChange={(p) => table.setPageIndex(p - 1)}
+          />
+        </>
+      )}
+    </CollapsibleSection>
+  );
+}
+
+// ── RunHistoryTab ─────────────────────────────────────────────────────────────
 
 function RunHistoryTab() {
-  const [filter, setFilter] = useState("");
-  const [sort, setSort] = useState<SortState>({ key: "id", dir: "desc" });
   const [page, setPage] = useState(1);
   const [runDetailId, setRunDetailId] = useState<number | null>(null);
 
+  // Text inputs — what the user sees immediately
+  const [inputProject, setInputProject] = useState("");
+  const [inputWorkflow, setInputWorkflow] = useState("");
+  const [inputTriggeredBy, setInputTriggeredBy] = useState("");
+
+  // Server-side filter params (debounced from inputs)
+  const [qProject, setQProject] = useState("");
+  const [qWorkflow, setQWorkflow] = useState("");
+  const [qTriggeredBy, setQTriggeredBy] = useState("");
+  const [qStatus, setQStatus] = useState("");
+
+  // TanStack Table state — client-side filters within current page
+  const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: true }]);
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setQProject(inputProject);
+      setQWorkflow(inputWorkflow);
+      setQTriggeredBy(inputTriggeredBy);
+      setPage(1);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [inputProject, inputWorkflow, inputTriggeredBy]);
+
   const { data, isLoading } = useQuery({
-    queryKey: ["runs-all", page],
-    queryFn: () => api.get<PaginatedResponse<WorkflowRun>>(`/runs/?page=${page}`).then((r) => r.data),
+    queryKey: ["runs-all", page, qProject, qWorkflow, qStatus, qTriggeredBy],
+    queryFn: () => {
+      const p = new URLSearchParams({ page: String(page) });
+      if (qProject) p.set("project", qProject);
+      if (qWorkflow) p.set("workflow_name", qWorkflow);
+      if (qStatus) p.set("status", qStatus);
+      if (qTriggeredBy) p.set("triggered_by", qTriggeredBy);
+      return api.get<PaginatedResponse<WorkflowRun>>(`/runs/?${p}`).then((r) => r.data);
+    },
     staleTime: 30_000,
   });
 
-  const rows = useMemo(
-    () => sortRuns(filterRuns(data?.results ?? [], filter), sort),
-    [data?.results, filter, sort]
+  const columns = useMemo(
+    () => [
+      runHelper.accessor("id", {
+        header: ({ column }) => <SortHeader column={column}>Run</SortHeader>,
+        cell: ({ getValue }) => (
+          <button
+            onClick={() => setRunDetailId(getValue())}
+            className="text-primary hover:underline font-mono text-xs"
+          >
+            #{getValue()}
+          </button>
+        ),
+      }),
+      runHelper.accessor("project_name", {
+        id: "project",
+        header: ({ column }) => <SortHeader column={column}>Project</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+        enableColumnFilter: false,
+      }),
+      runHelper.accessor("workflow_name", {
+        id: "workflow",
+        header: ({ column }) => <SortHeader column={column}>Workflow</SortHeader>,
+        cell: ({ row, getValue }) => (
+          <span className="text-xs font-medium">{getValue() ?? `#${row.original.workflow}`}</span>
+        ),
+        enableColumnFilter: false,
+      }),
+      runHelper.accessor("step_name", {
+        id: "step",
+        header: ({ column }) => <SortHeader column={column}>Step</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+        filterFn: stepNameFilter,
+      }),
+      runHelper.accessor("status", {
+        header: ({ column }) => <SortHeader column={column}>Status</SortHeader>,
+        cell: ({ getValue }) => <StatusBadge status={getValue()} />,
+        enableColumnFilter: false,
+      }),
+      runHelper.accessor("started_at", {
+        id: "started",
+        header: ({ column }) => <SortHeader column={column}>Started</SortHeader>,
+        cell: ({ getValue }) => <span className="text-xs">{formatTime(getValue())}</span>,
+        filterFn: startedAtFilter,
+      }),
+      runHelper.accessor("duration_seconds", {
+        id: "duration",
+        header: ({ column }) => <SortHeader column={column}>Duration</SortHeader>,
+        cell: ({ getValue }) => <span className="text-xs font-mono">{formatDuration(getValue())}</span>,
+        enableColumnFilter: false,
+      }),
+      runHelper.accessor("triggered_by_name", {
+        id: "triggered_by",
+        header: ({ column }) => <SortHeader column={column}>Triggered By</SortHeader>,
+        cell: ({ getValue }) => (
+          <span className="text-xs text-muted-foreground">{getValue() ?? "—"}</span>
+        ),
+        enableColumnFilter: false,
+      }),
+    ],
+    []
   );
 
-  const handleFilterChange = (v: string) => {
-    setFilter(v);
+  const table = useReactTable({
+    data: data?.results ?? [],
+    columns,
+    state: { sorting, columnFilters },
+    onSortingChange: setSorting,
+    onColumnFiltersChange: setColumnFilters,
+    getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    manualPagination: true,
+    pageCount: data?.count != null ? Math.ceil(data.count / PAGE_SIZE) : -1,
+  });
+
+  const stepFilterValue = (table.getColumn("step")?.getFilterValue() as string) ?? "";
+  const startedFilterValue = (table.getColumn("started")?.getFilterValue() as string) ?? "";
+
+  const hasFilters =
+    inputProject ||
+    inputWorkflow ||
+    inputTriggeredBy ||
+    qStatus ||
+    stepFilterValue ||
+    startedFilterValue;
+
+  const clearFilters = () => {
+    setInputProject(""); setInputWorkflow(""); setInputTriggeredBy("");
+    setQProject(""); setQWorkflow(""); setQTriggeredBy("");
+    setQStatus("");
+    table.getColumn("step")?.setFilterValue("");
+    table.getColumn("started")?.setFilterValue("");
     setPage(1);
   };
+
+  const rows = table.getFilteredRowModel().rows;
 
   return (
     <div className="space-y-3">
@@ -200,57 +763,106 @@ function RunHistoryTab() {
         <span className="text-sm text-muted-foreground">
           {data?.count != null ? `${data.count} total` : ""}
         </span>
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-          <Input
-            value={filter}
-            onChange={(e) => handleFilterChange(e.target.value)}
-            placeholder="Filter…"
-            className="h-7 pl-7 text-xs w-52"
-          />
-        </div>
+        {hasFilters && (
+          <button
+            onClick={clearFilters}
+            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+          >
+            <X className="h-3 w-3" />Clear filters
+          </button>
+        )}
       </div>
       <RunDetailDialog runId={runDetailId} onClose={() => setRunDetailId(null)} />
       <div className="rounded-lg border overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className={thClass}>
-              <SortableTh label="Run" sortKey="id" sort={sort} onSort={(k) => setSort(nextSort(sort, k))} />
-              <SortableTh label="Project" sortKey="project" sort={sort} onSort={(k) => setSort(nextSort(sort, k))} />
-              <SortableTh label="Workflow" sortKey="workflow" sort={sort} onSort={(k) => setSort(nextSort(sort, k))} />
-              <SortableTh label="Step" sortKey="step" sort={sort} onSort={(k) => setSort(nextSort(sort, k))} />
-              <SortableTh label="Status" sortKey="status" sort={sort} onSort={(k) => setSort(nextSort(sort, k))} />
-              <SortableTh label="Started" sortKey="started_at" sort={sort} onSort={(k) => setSort(nextSort(sort, k))} />
-              <SortableTh label="Duration" sortKey="duration" sort={sort} onSort={(k) => setSort(nextSort(sort, k))} />
-              <SortableTh label="Triggered By" sortKey="triggered_by" sort={sort} onSort={(k) => setSort(nextSort(sort, k))} />
+              {table.getHeaderGroups()[0].headers.map((header) => (
+                <th key={header.id} className="px-4 py-2 text-left">
+                  {header.isPlaceholder
+                    ? null
+                    : flexRender(header.column.columnDef.header, header.getContext())}
+                </th>
+              ))}
+            </tr>
+            <tr className="border-b bg-muted/5">
+              <td className="px-4 py-1" />
+              <td className="px-2 py-1">
+                <input
+                  value={inputProject}
+                  onChange={(e) => setInputProject(e.target.value)}
+                  placeholder="Project…"
+                  className={filterInputClass}
+                />
+              </td>
+              <td className="px-2 py-1">
+                <input
+                  value={inputWorkflow}
+                  onChange={(e) => setInputWorkflow(e.target.value)}
+                  placeholder="Workflow…"
+                  className={filterInputClass}
+                />
+              </td>
+              <td className="px-2 py-1">
+                <input
+                  value={stepFilterValue}
+                  onChange={(e) => table.getColumn("step")?.setFilterValue(e.target.value)}
+                  placeholder="Step…"
+                  className={filterInputClass}
+                />
+              </td>
+              <td className="px-2 py-1">
+                <select
+                  value={qStatus}
+                  onChange={(e) => { setQStatus(e.target.value); setPage(1); }}
+                  className={filterInputClass}
+                >
+                  <option value="">All</option>
+                  {RUN_STATUSES.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </td>
+              <td className="px-2 py-1">
+                <input
+                  value={startedFilterValue}
+                  onChange={(e) => table.getColumn("started")?.setFilterValue(e.target.value)}
+                  placeholder="yyyy-MM-dd…"
+                  className={filterInputClass}
+                />
+              </td>
+              <td className="px-4 py-1" />
+              <td className="px-2 py-1">
+                <input
+                  value={inputTriggeredBy}
+                  onChange={(e) => setInputTriggeredBy(e.target.value)}
+                  placeholder="Triggered by…"
+                  className={filterInputClass}
+                />
+              </td>
             </tr>
           </thead>
           <tbody>
             {isLoading && (
               <tr>
-                <td colSpan={8} className="px-4 py-6 text-center text-muted-foreground">Loading…</td>
+                <td colSpan={8} className="px-4 py-6 text-center text-muted-foreground">
+                  Loading…
+                </td>
               </tr>
             )}
-            {rows.map((run, i) => (
-              <tr key={run.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/10"}>
-                <td className="px-4 py-2">
-                  <button onClick={() => setRunDetailId(run.id)} className="text-primary hover:underline font-mono text-xs">
-                    #{run.id}
-                  </button>
-                </td>
-                <td className="px-4 py-2 text-xs text-muted-foreground">{run.project_name ?? "—"}</td>
-                <td className="px-4 py-2 text-xs font-medium">{run.workflow_name ?? `#${run.workflow}`}</td>
-                <td className="px-4 py-2 text-xs text-muted-foreground">{run.step_name ?? "—"}</td>
-                <td className="px-4 py-2"><StatusBadge status={run.status} /></td>
-                <td className="px-4 py-2 text-xs">{formatTime(run.started_at)}</td>
-                <td className="px-4 py-2 text-xs font-mono">{formatDuration(run.duration_seconds)}</td>
-                <td className="px-4 py-2 text-xs text-muted-foreground">{run.triggered_by_name ?? "—"}</td>
+            {rows.map((row, i) => (
+              <tr key={row.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/10"}>
+                {row.getVisibleCells().map((cell) => (
+                  <td key={cell.id} className="px-4 py-2">
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </td>
+                ))}
               </tr>
             ))}
             {!isLoading && rows.length === 0 && (
               <tr>
                 <td colSpan={8} className="px-4 py-6 text-center text-muted-foreground">
-                  {filter ? "No matches." : "No runs yet."}
+                  {hasFilters ? "No matches." : "No runs yet."}
                 </td>
               </tr>
             )}
@@ -268,8 +880,11 @@ export function DashboardPage() {
   const [tab, setTab] = useState<"overview" | "history">("overview");
   const [window, setWindow] = useState(30);
   const [runDetailId, setRunDetailId] = useState<number | null>(null);
+  const { addToast } = useToast();
+  const { user } = useAuth();
+  const canRun = user?.role === "admin" || user?.role === "operator";
+  const qc = useQueryClient();
 
-  // Server-push status updates via WebSocket
   useGlobalStatus();
 
   const { data, isLoading, refetch } = useQuery({
@@ -278,66 +893,26 @@ export function DashboardPage() {
     staleTime: 30_000,
   });
 
+  const stopRun = useMutation({
+    mutationFn: (runId: number) => api.post(`/runs/${runId}/stop/`),
+    onSuccess: () => {
+      refetch();
+      qc.invalidateQueries({ queryKey: ["runs-all"] });
+      addToast("Stop signal sent", "success");
+    },
+    onError: (err) => addToast(getApiError(err), "error"),
+  });
+
   useLiveTick(1000, (data?.running?.length ?? 0) > 0);
-
-  // Running table
-  const [runningFilter, setRunningFilter] = useState("");
-  const [runningSort, setRunningSort] = useState<SortState>({ key: "id", dir: "desc" });
-  const [runningPage, setRunningPage] = useState(1);
-  const runningRows = useMemo(
-    () => sortRuns(filterRuns(data?.running ?? [], runningFilter), runningSort),
-    [data?.running, runningFilter, runningSort]
-  );
-  const runningPageRows = runningRows.slice((runningPage - 1) * PAGE_SIZE, runningPage * PAGE_SIZE);
-
-  const handleRunningFilterChange = (v: string) => { setRunningFilter(v); setRunningPage(1); };
-
-  // Recent table
-  const [recentFilter, setRecentFilter] = useState("");
-  const [recentSort, setRecentSort] = useState<SortState>({ key: "finished_at", dir: "desc" });
-  const [recentPage, setRecentPage] = useState(1);
-  const recentRows = useMemo(
-    () => sortRuns(filterRuns(data?.recent ?? [], recentFilter), recentSort),
-    [data?.recent, recentFilter, recentSort]
-  );
-  const recentPageRows = recentRows.slice((recentPage - 1) * PAGE_SIZE, recentPage * PAGE_SIZE);
-
-  const handleRecentFilterChange = (v: string) => { setRecentFilter(v); setRecentPage(1); };
-
-  // Scheduled table
-  const [schedFilter, setSchedFilter] = useState("");
-  const [schedSort, setSchedSort] = useState<SortState>({ key: "next_run", dir: "asc" });
-  const [schedPage, setSchedPage] = useState(1);
-  const schedRows = useMemo(() => {
-    const rows = data?.scheduled ?? [];
-    const filtered = schedFilter
-      ? rows.filter(
-          (s) =>
-            s.name.toLowerCase().includes(schedFilter.toLowerCase()) ||
-            s.project_name.toLowerCase().includes(schedFilter.toLowerCase())
-        )
-      : rows;
-    return [...filtered].sort((a, b) => {
-      let va: any;
-      let vb: any;
-      if (schedSort.key === "name")         { va = a.name;         vb = b.name; }
-      else if (schedSort.key === "project") { va = a.project_name; vb = b.project_name; }
-      else                                  { va = a.next_run;     vb = b.next_run; }
-      if (va < vb) return schedSort.dir === "asc" ? -1 : 1;
-      if (va > vb) return schedSort.dir === "asc" ? 1 : -1;
-      return 0;
-    });
-  }, [data?.scheduled, schedFilter, schedSort]);
-  const schedPageRows = schedRows.slice((schedPage - 1) * PAGE_SIZE, schedPage * PAGE_SIZE);
-
-  const handleSchedFilterChange = (v: string) => { setSchedFilter(v); setSchedPage(1); };
 
   return (
     <div className="space-y-4">
       <RunDetailDialog runId={runDetailId} onClose={() => setRunDetailId(null)} />
-      {/* Header */}
+
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold flex items-center gap-2"><LayoutDashboard className="h-6 w-6" />Monitor</h1>
+        <h1 className="text-2xl font-bold flex items-center gap-2">
+          <LayoutDashboard className="h-6 w-6" />Monitor
+        </h1>
         {tab === "overview" && (
           <div className="flex items-center gap-2">
             <div className="flex gap-1">
@@ -359,7 +934,6 @@ export function DashboardPage() {
         )}
       </div>
 
-      {/* Tabs */}
       <div className="border-b flex">
         {(["overview", "history"] as const).map((t) => (
           <button
@@ -377,157 +951,20 @@ export function DashboardPage() {
         ))}
       </div>
 
-      {/* Tab content */}
       {tab === "overview" ? (
         isLoading ? (
           <p className="text-muted-foreground">Loading…</p>
         ) : (
           <div className="space-y-4">
-
-            {/* Currently Running */}
-            <CollapsibleSection
-              title="Currently Running"
-              count={runningRows.length}
-              filter={runningFilter}
-              onFilterChange={handleRunningFilterChange}
-            >
-              {runningRows.length === 0 ? (
-                <p className="px-4 py-3 text-sm text-muted-foreground">
-                  {runningFilter ? "No matches." : "No running workflows."}
-                </p>
-              ) : (
-                <>
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className={thClass}>
-                        <SortableTh label="Run" sortKey="id" sort={runningSort} onSort={(k) => setRunningSort(nextSort(runningSort, k))} />
-                        <SortableTh label="Project" sortKey="project" sort={runningSort} onSort={(k) => setRunningSort(nextSort(runningSort, k))} />
-                        <SortableTh label="Workflow" sortKey="workflow" sort={runningSort} onSort={(k) => setRunningSort(nextSort(runningSort, k))} />
-                        <SortableTh label="Step" sortKey="step" sort={runningSort} onSort={(k) => setRunningSort(nextSort(runningSort, k))} />
-                        <SortableTh label="Started" sortKey="started_at" sort={runningSort} onSort={(k) => setRunningSort(nextSort(runningSort, k))} />
-                        <SortableTh label="Duration" sortKey="duration" sort={runningSort} onSort={(k) => setRunningSort(nextSort(runningSort, k))} />
-                        <SortableTh label="Triggered By" sortKey="triggered_by" sort={runningSort} onSort={(k) => setRunningSort(nextSort(runningSort, k))} />
-                        <SortableTh label="Status" sortKey="status" sort={runningSort} onSort={(k) => setRunningSort(nextSort(runningSort, k))} />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {runningPageRows.map((run, i) => (
-                        <tr key={run.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/10"}>
-                          <td className="px-4 py-2">
-                            <button onClick={() => setRunDetailId(run.id)} className="text-primary hover:underline font-mono text-xs">
-                              #{run.id}
-                            </button>
-                          </td>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">{run.project_name ?? "—"}</td>
-                          <td className="px-4 py-2 text-xs font-medium">{run.workflow_name ?? `#${run.workflow}`}</td>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">{run.step_name ?? "—"}</td>
-                          <td className="px-4 py-2 text-xs">{formatTime(run.started_at)}</td>
-                          <td className="px-4 py-2 text-xs font-mono">{formatElapsed(run.started_at)}</td>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">{run.triggered_by_name ?? "—"}</td>
-                          <td className="px-4 py-2"><StatusBadge status={run.status} /></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <Pagination page={runningPage} count={runningRows.length} pageSize={PAGE_SIZE} onChange={setRunningPage} />
-                </>
-              )}
-            </CollapsibleSection>
-
-            {/* Recently Completed */}
-            <CollapsibleSection
-              title="Recently Completed"
-              count={recentRows.length}
-              filter={recentFilter}
-              onFilterChange={handleRecentFilterChange}
-            >
-              {recentRows.length === 0 ? (
-                <p className="px-4 py-3 text-sm text-muted-foreground">
-                  {recentFilter ? "No matches." : "No recent completions."}
-                </p>
-              ) : (
-                <>
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className={thClass}>
-                        <SortableTh label="Run" sortKey="id" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                        <SortableTh label="Project" sortKey="project" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                        <SortableTh label="Workflow" sortKey="workflow" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                        <SortableTh label="Step" sortKey="step" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                        <SortableTh label="Started" sortKey="started_at" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                        <SortableTh label="Finished" sortKey="finished_at" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                        <SortableTh label="Duration" sortKey="duration" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                        <SortableTh label="Triggered By" sortKey="triggered_by" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                        <SortableTh label="Status" sortKey="status" sort={recentSort} onSort={(k) => setRecentSort(nextSort(recentSort, k))} />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {recentPageRows.map((run, i) => (
-                        <tr key={run.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/10"}>
-                          <td className="px-4 py-2">
-                            <button onClick={() => setRunDetailId(run.id)} className="text-primary hover:underline font-mono text-xs">
-                              #{run.id}
-                            </button>
-                          </td>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">{run.project_name ?? "—"}</td>
-                          <td className="px-4 py-2 text-xs font-medium">{run.workflow_name ?? `#${run.workflow}`}</td>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">{run.step_name ?? "—"}</td>
-                          <td className="px-4 py-2 text-xs">{formatTime(run.started_at)}</td>
-                          <td className="px-4 py-2 text-xs">{formatTime(run.finished_at)}</td>
-                          <td className="px-4 py-2 text-xs font-mono">{formatDuration(run.duration_seconds)}</td>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">{run.triggered_by_name ?? "—"}</td>
-                          <td className="px-4 py-2"><StatusBadge status={run.status} /></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <Pagination page={recentPage} count={recentRows.length} pageSize={PAGE_SIZE} onChange={setRecentPage} />
-                </>
-              )}
-            </CollapsibleSection>
-
-            {/* Upcoming Scheduled */}
-            <CollapsibleSection
-              title="Upcoming Scheduled"
-              count={schedRows.length}
-              filter={schedFilter}
-              onFilterChange={handleSchedFilterChange}
-            >
-              {schedRows.length === 0 ? (
-                <p className="px-4 py-3 text-sm text-muted-foreground">
-                  {schedFilter ? "No matches." : "No upcoming scheduled runs."}
-                </p>
-              ) : (
-                <>
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className={thClass}>
-                        <SortableTh label="Project" sortKey="project" sort={schedSort} onSort={(k) => setSchedSort(nextSort(schedSort, k))} />
-                        <SortableTh label="Workflow" sortKey="name" sort={schedSort} onSort={(k) => setSchedSort(nextSort(schedSort, k))} />
-                        <SortableTh label="Next Run" sortKey="next_run" sort={schedSort} onSort={(k) => setSchedSort(nextSort(schedSort, k))} />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {schedPageRows.map((s, i) => (
-                        <tr key={s.id} className={i % 2 === 0 ? "bg-background" : "bg-muted/10"}>
-                          <td className="px-4 py-2 text-xs text-muted-foreground">{s.project_name}</td>
-                          <td className="px-4 py-2 text-xs font-medium">
-                            <Link to="/projects" className="text-primary hover:underline">
-                              {s.name}
-                            </Link>
-                          </td>
-                          <td className="px-4 py-2 text-xs font-mono">
-                            {new Date(s.next_run).toLocaleString()}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <Pagination page={schedPage} count={schedRows.length} pageSize={PAGE_SIZE} onChange={setSchedPage} />
-                </>
-              )}
-            </CollapsibleSection>
-
+            <RunningSection
+              runs={data?.running ?? []}
+              canRun={canRun}
+              onStop={(id) => stopRun.mutate(id)}
+              isPending={stopRun.isPending}
+              onDetail={setRunDetailId}
+            />
+            <RecentSection runs={data?.recent ?? []} onDetail={setRunDetailId} />
+            <ScheduledSection scheduled={data?.scheduled ?? []} />
           </div>
         )
       ) : (

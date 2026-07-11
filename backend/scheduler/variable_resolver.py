@@ -1,3 +1,4 @@
+import os
 import re
 import math
 import datetime
@@ -11,7 +12,8 @@ _SAFE_BUILTINS = {
     "__builtins__": {},
 }
 
-_VAR_RE = re.compile(r"\{(\w+)\}")
+# Matches {var_name} and {env.VAR_NAME} (dotted names supported)
+_VAR_RE = re.compile(r"\{(\w+(?:\.\w+)*)\}")
 
 
 def _safe_eval(expression: str) -> Any:
@@ -21,19 +23,35 @@ def _safe_eval(expression: str) -> Any:
         return expression
 
 
-def resolve(text: str) -> str:
-    """Replace {var_name} placeholders with their evaluated values from the DB."""
+def resolve(text: str, runtime_vars: dict | None = None) -> str:
+    """Replace {var_name}, {env.VAR_NAME}, and {step.NAME} placeholders.
+
+    {env.NAME}   → os.environ["NAME"]           (left unchanged if absent)
+    {step.NAME}  → runtime_vars["NAME"]          (left unchanged if absent)
+    {name}       → DB Variable evaluated expression
+    """
     from core.models import Variable
 
     variables = {v.name: v.expression for v in Variable.objects.all()}
+    _runtime = runtime_vars or {}
+
+    def _lookup(name: str) -> str:
+        if name.startswith("env."):
+            return os.environ.get(name[4:], f"{{{name}}}")
+        if name.startswith("step."):
+            return str(_runtime.get(name[5:], f"{{{name}}}"))
+        return variables.get(name, f"{{{name}}}")
 
     def replace(match):
         name = match.group(1)
+        if name.startswith("env."):
+            return os.environ.get(name[4:], match.group(0))
+        if name.startswith("step."):
+            return str(_runtime.get(name[5:], match.group(0)))
         if name not in variables:
-            return match.group(0)  # leave unreferenced vars as-is
+            return match.group(0)
         expr = variables[name]
-        # Recursively resolve nested variable references in the expression
-        expr = _VAR_RE.sub(lambda m: variables.get(m.group(1), m.group(0)), expr)
+        expr = _VAR_RE.sub(lambda m: _lookup(m.group(1)), expr)
         return str(_safe_eval(expr))
 
     return _VAR_RE.sub(replace, text)

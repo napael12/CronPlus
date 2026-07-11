@@ -3,6 +3,7 @@ Low-level step executor: runs an OS process for a Step, streams output over
 WebSocket, captures metrics, enforces timeout, and writes the StepRun record.
 """
 import os
+import re
 import shlex
 import threading
 import subprocess
@@ -19,6 +20,7 @@ from .variable_resolver import resolve
 
 _MAX_BYTES = settings.LOG_MAX_OUTPUT_BYTES
 _CHANNEL_GROUP_PREFIX = "run_"
+_SETVAR_RE = re.compile(r"^::set-var (\w+)=(.*)")
 
 
 def _ws_group(workflow_run_id: int) -> str:
@@ -73,10 +75,18 @@ def run_step(step_run_id: int, workflow_run_id: int) -> bool:
         step_run.save(update_fields=["status"])
         return True
 
+    # Load accumulated runtime vars from previous steps in this workflow run
+    try:
+        from core.models import WorkflowRun as _WR
+        _wr = _WR.objects.only("runtime_vars").get(pk=workflow_run_id)
+        runtime_vars = _wr.runtime_vars or {}
+    except Exception:
+        runtime_vars = {}
+
     # Resolve variables in command, parameters, and working_directory
-    command = resolve(step.command)
-    parameters = resolve(step.parameters)
-    working_dir = resolve(step.working_directory) or None
+    command = resolve(step.command, runtime_vars=runtime_vars)
+    parameters = resolve(step.parameters, runtime_vars=runtime_vars)
+    working_dir = resolve(step.working_directory, runtime_vars=runtime_vars) or None
     full_cmd = f"{command} {parameters}".strip()
 
     step_run.status = StepRun.Status.RUNNING
@@ -99,6 +109,7 @@ def run_step(step_run_id: int, workflow_run_id: int) -> bool:
 
     stdout_buf = []
     stderr_buf = []
+    captured_vars: dict = {}
     total_bytes = 0
     truncated = False
 
@@ -130,10 +141,15 @@ def run_step(step_run_id: int, workflow_run_id: int) -> bool:
     metrics_thread = threading.Thread(target=_metrics_runner, daemon=True)
     metrics_thread.start()
 
-    # Stream stdout
+    # Stream stdout/stderr; intercept ::set-var lines from stdout
     def _read_stream(stream, buf, label):
         nonlocal total_bytes, truncated
         for line in stream:
+            if label == "stdout":
+                m = _SETVAR_RE.match(line.rstrip("\n"))
+                if m:
+                    captured_vars[m.group(1)] = m.group(2)
+                    continue  # control line: not stored, not sent over WS
             if total_bytes >= _MAX_BYTES:
                 truncated = True
                 break
@@ -159,13 +175,27 @@ def run_step(step_run_id: int, workflow_run_id: int) -> bool:
             timeout = int(AppSetting.objects.get(key="default_timeout").value)
         except (AppSetting.DoesNotExist, ValueError):
             timeout = 600
+
+    deadline = (time.monotonic() + timeout) if timeout != -1 else None
     timed_out = False
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        timed_out = True
+    cancelled = False
+    while proc.poll() is None:
+        if deadline is not None and time.monotonic() >= deadline:
+            proc.kill()
+            proc.wait()
+            timed_out = True
+            break
+        try:
+            from core.models import WorkflowRun as _WR
+            wr = _WR.objects.only("status").get(pk=workflow_run_id)
+            if wr.status == _WR.Status.STOPPED:
+                proc.kill()
+                proc.wait()
+                cancelled = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
 
     stdout_thread.join(timeout=5)
     stderr_thread.join(timeout=5)
@@ -179,10 +209,14 @@ def run_step(step_run_id: int, workflow_run_id: int) -> bool:
     step_run.truncated = truncated
     step_run.peak_cpu_percent = metrics_result[0]
     step_run.peak_memory_mb = metrics_result[1]
+    step_run.output_vars = captured_vars
     step_run.finished_at = tz.now()
 
     if timed_out:
         step_run.status = StepRun.Status.TIMEOUT
+        success = False
+    elif cancelled:
+        step_run.status = StepRun.Status.STOPPED
         success = False
     elif exit_code == 0:
         step_run.status = StepRun.Status.SUCCESS

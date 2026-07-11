@@ -1,3 +1,7 @@
+# ── Service / Installer ───────────────────────────────────────────────────────
+service/nssm.exe
+service/admin.cred
+
 # ── Python / Django ──────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]

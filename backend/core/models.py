@@ -186,6 +186,7 @@ class WorkflowRun(models.Model):
         RUNNING = "running", "Running"
         SUCCESS = "success", "Success"
         FAILED = "failed", "Failed"
+        STOPPED = "stopped", "Stopped"
         SKIPPED = "skipped", "Skipped"
 
     workflow = models.ForeignKey(Workflow, on_delete=models.CASCADE, related_name="runs")
@@ -196,6 +197,7 @@ class WorkflowRun(models.Model):
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    runtime_vars = models.JSONField(default=dict, blank=True)
 
     @property
     def duration_seconds(self):
@@ -214,6 +216,7 @@ class StepRun(models.Model):
         SUCCESS = "success", "Success"
         FAILED = "failed", "Failed"
         TIMEOUT = "timeout", "Timeout"
+        STOPPED = "stopped", "Stopped"
         SKIPPED = "skipped", "Skipped"
 
     workflow_run = models.ForeignKey(WorkflowRun, on_delete=models.CASCADE, related_name="step_runs")
@@ -228,6 +231,7 @@ class StepRun(models.Model):
     peak_cpu_percent = models.FloatField(null=True, blank=True)
     peak_memory_mb = models.FloatField(null=True, blank=True)
     truncated = models.BooleanField(default=False)
+    output_vars = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ["id"]

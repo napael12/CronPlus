@@ -5,6 +5,8 @@ from email.mime.multipart import MIMEMultipart
 
 from django.conf import settings
 
+from .variable_resolver import resolve
+
 logger = logging.getLogger(__name__)
 
 _SUBJECT_TEMPLATE = "CronPlus {instance} - {workflow}: {status}"
@@ -52,7 +54,7 @@ def send_workflow_notification(workflow_run):
     instance = setting("cronplus_instance_name") or settings.CRONPLUS_INSTANCE_NAME
 
     workflow = workflow_run.workflow
-    recipients_raw = workflow.notification_recipients.strip()
+    recipients_raw = resolve(workflow.notification_recipients).strip()
     if not recipients_raw:
         return
     recipients = [r.strip() for r in recipients_raw.split(",") if r.strip()]

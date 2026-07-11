@@ -182,7 +182,7 @@ class StepRunSerializer(serializers.ModelSerializer):
             "id", "workflow_run", "step", "step_name", "status",
             "started_at", "finished_at", "stdout", "stderr",
             "exit_code", "peak_cpu_percent", "peak_memory_mb",
-            "truncated", "duration_seconds",
+            "truncated", "duration_seconds", "output_vars",
         ]
         read_only_fields = fields
 

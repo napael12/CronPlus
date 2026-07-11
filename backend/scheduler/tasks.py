@@ -106,6 +106,14 @@ def _execute_workflow(workflow, workflow_run):
         if not all_success:
             overall_success = False
 
+        # Promote output_vars from this group into shared runtime_vars
+        _flush_step_vars(group, workflow_run)
+
+        # Stop processing if the run was cancelled externally
+        workflow_run.refresh_from_db(fields=["status"])
+        if workflow_run.status == "stopped":
+            break
+
         outcome = representative.on_success if all_success else representative.on_error
         outcome_workflow = (
             representative.on_success_workflow if all_success
@@ -127,6 +135,21 @@ def _run_step_in_workflow(step, workflow_run):
         return True
     step_run = _create_step_run(step, workflow_run)
     return run_step(step_run.pk, workflow_run.pk)
+
+
+def _flush_step_vars(group_steps, workflow_run):
+    """Merge output_vars from completed steps into WorkflowRun.runtime_vars."""
+    from core.models import StepRun
+    step_ids = [s.pk for s in group_steps]
+    merged = {}
+    for sr in StepRun.objects.filter(
+        workflow_run=workflow_run, step_id__in=step_ids
+    ).only("output_vars"):
+        merged.update(sr.output_vars or {})
+    if merged:
+        workflow_run.refresh_from_db(fields=["runtime_vars"])
+        workflow_run.runtime_vars = {**(workflow_run.runtime_vars or {}), **merged}
+        workflow_run.save(update_fields=["runtime_vars"])
 
 
 @huey.task()
@@ -175,7 +198,9 @@ def run_workflow_task(workflow_id: int, triggered_by_id=None, triggered_by_sched
         _maybe_notify(workflow, run)
         raise
 
-    run.status = WorkflowRun.Status.SUCCESS if success else WorkflowRun.Status.FAILED
+    run.refresh_from_db(fields=["status"])
+    if run.status != WorkflowRun.Status.STOPPED:
+        run.status = WorkflowRun.Status.SUCCESS if success else WorkflowRun.Status.FAILED
     run.finished_at = tz.now()
     run.save(update_fields=["status", "finished_at"])
     _maybe_notify(workflow, run)
@@ -217,8 +242,9 @@ def run_step_standalone_task(step_id: int, triggered_by_id=None, follow_outcome:
         outcome_workflow = step.on_success_workflow if success else step.on_error_workflow
         if outcome == "launch_workflow" and outcome_workflow:
             run_workflow_task(outcome_workflow.pk)
-    run.status = WorkflowRun.Status.SUCCESS if success else WorkflowRun.Status.FAILED
-
+    run.refresh_from_db(fields=["status"])
+    if run.status != WorkflowRun.Status.STOPPED:
+        run.status = WorkflowRun.Status.SUCCESS if success else WorkflowRun.Status.FAILED
     run.finished_at = tz.now()
     run.save(update_fields=["status", "finished_at"])
 
@@ -270,7 +296,7 @@ def cleanup_old_logs():
 
     cutoff = timezone.now() - timedelta(days=days)
     deleted, _ = WorkflowRun.objects.filter(
-        status__in=["success", "failed", "timeout"],
+        status__in=["success", "failed", "stopped"],
         finished_at__lt=cutoff,
     ).delete()
     logger.info("Log cleanup: deleted %d workflow runs older than %d days", deleted, days)

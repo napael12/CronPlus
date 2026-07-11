@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, ChevronRight, Play, Download, Upload, Pencil, Trash2, Copy, CopyPlus, ClipboardPaste, X, Search, History, MoreHorizontal, FolderKanban } from "lucide-react";
+import { Plus, ChevronRight, Play, Download, Upload, Pencil, Trash2, Copy, CopyPlus, ClipboardPaste, X, Search, History, MoreHorizontal, FolderKanban, Square } from "lucide-react";
 import api, { Project, Workflow, Step, WorkflowRun, StepRun, PaginatedResponse, AppSetting, getApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -107,6 +107,7 @@ function WorkflowForm({
           onChange={(e) => setRecipients(e.target.value)}
           placeholder="email@example.com, other@example.com"
         />
+        <p className="text-xs text-muted-foreground">Supports <code>{"{var}"}</code> and <code>{"{env.NAME}"}</code></p>
       </div>
       <div className="flex gap-6 flex-wrap">
         <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -189,14 +190,17 @@ function StepForm({
       <div className="space-y-1">
         <Label>Command</Label>
         <Input value={command} onChange={(e) => setCommand(e.target.value)} placeholder="python" className="font-mono" />
+        <p className="text-xs text-muted-foreground">Supports <code>{"{var}"}</code>, <code>{"{env.NAME}"}</code>, and <code>{"{step.NAME}"}</code></p>
       </div>
       <div className="space-y-1">
         <Label>Parameters</Label>
         <Textarea value={parameters} onChange={(e) => setParameters(e.target.value)} placeholder='-c "print(1)"' className="font-mono text-sm" rows={4} />
+        <p className="text-xs text-muted-foreground">Supports <code>{"{var}"}</code>, <code>{"{env.NAME}"}</code>, and <code>{"{step.NAME}"}</code>. Print <code>{"::set-var NAME=value"}</code> to stdout to export a value for later steps.</p>
       </div>
       <div className="space-y-1">
         <Label>Working Directory</Label>
         <Input value={workingDir} onChange={(e) => setWorkingDir(e.target.value)} placeholder="Leave blank for default" className="font-mono" />
+        <p className="text-xs text-muted-foreground">Supports <code>{"{var}"}</code>, <code>{"{env.NAME}"}</code>, and <code>{"{step.NAME}"}</code></p>
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1">
@@ -645,6 +649,12 @@ function WorkflowSteps({
     onError: (err) => addToast(getApiError(err), "error"),
   });
 
+  const stopStepRun = useMutation({
+    mutationFn: (stepRunId: number) => api.post(`/step-runs/${stepRunId}/stop/`),
+    onSuccess: () => { invalidate(); addToast("Stop signal sent", "success"); },
+    onError: (err) => addToast(getApiError(err), "error"),
+  });
+
   const cloneStep = useMutation({
     mutationFn: ({ id, name }: { id: number; name: string }) =>
       api.post(`/steps/${id}/clone/`, { workflow: workflow.id, name }),
@@ -748,6 +758,18 @@ function WorkflowSteps({
                           {canRun && (
                             <DropdownMenuItem onClick={() => runStep.mutate(s.id)} disabled={runStep.isPending}>
                               <Play className="h-3.5 w-3.5" />Run
+                            </DropdownMenuItem>
+                          )}
+                          {canRun && s.last_run_status === "running" && s.last_run_id != null && (
+                            <DropdownMenuItem
+                              destructive
+                              onClick={() => {
+                                if (confirm(`Stop currently running step "${s.name}"? This will also stop all subsequent steps in the workflow.`))
+                                  stopStepRun.mutate(s.last_run_id!);
+                              }}
+                              disabled={stopStepRun.isPending}
+                            >
+                              <Square className="h-3.5 w-3.5" />Stop Process
                             </DropdownMenuItem>
                           )}
                           <DropdownMenuItem onClick={() => onViewHistory(s)}>
@@ -953,6 +975,12 @@ export function ProjectsPage() {
   const runWorkflow = useMutation({
     mutationFn: (id: number) => api.post(`/workflows/${id}/run/`),
     onSuccess: () => { invalidateWorkflows(); addToast("Workflow queued", "success"); },
+    onError: (err) => addToast(getApiError(err), "error"),
+  });
+
+  const stopWorkflowRun = useMutation({
+    mutationFn: (runId: number) => api.post(`/runs/${runId}/stop/`),
+    onSuccess: () => { invalidateWorkflows(); addToast("Stop signal sent", "success"); },
     onError: (err) => addToast(getApiError(err), "error"),
   });
 
@@ -1311,6 +1339,18 @@ export function ProjectsPage() {
                                   {canRun && (
                                     <DropdownMenuItem onClick={() => runWorkflow.mutate(wf.id)} disabled={runWorkflow.isPending}>
                                       <Play className="h-3.5 w-3.5" />Run
+                                    </DropdownMenuItem>
+                                  )}
+                                  {canRun && wf.last_run_status === "running" && wf.last_run_id != null && (
+                                    <DropdownMenuItem
+                                      destructive
+                                      onClick={() => {
+                                        if (confirm(`Stop currently running workflow "${wf.name}"? All subsequent steps will be cancelled.`))
+                                          stopWorkflowRun.mutate(wf.last_run_id!);
+                                      }}
+                                      disabled={stopWorkflowRun.isPending}
+                                    >
+                                      <Square className="h-3.5 w-3.5" />Stop Process
                                     </DropdownMenuItem>
                                   )}
                                   <DropdownMenuItem onClick={() => setHistoryTarget({ type: "workflow", id: wf.id, name: wf.name })}>
