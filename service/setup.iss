@@ -70,6 +70,9 @@ Source: "install.bat";     DestDir: "{app}\service"; Flags: ignoreversion
 Source: "uninstall.bat";   DestDir: "{app}\service"; Flags: ignoreversion
 Source: "create_admin.py"; DestDir: "{app}\service"; Flags: ignoreversion
 
+; Example workflow scripts (referenced by sample steps, e.g. "scripts/sample1.py")
+Source: "..\scripts\*"; DestDir: "{app}\scripts"; Flags: recursesubdirs createallsubdirs ignoreversion
+
 ; ── Directories ───────────────────────────────────────────────────────────────
 
 [Dirs]
