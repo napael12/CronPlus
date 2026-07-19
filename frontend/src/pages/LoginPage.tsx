@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Clock } from "lucide-react";
+import { ClockPlus } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,7 +34,7 @@ export function LoginPage() {
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-2">
-            <Clock className="h-8 w-8 text-primary" />
+            <ClockPlus className="h-8 w-8 text-primary" />
           </div>
           <CardTitle className="text-2xl">CronPlus</CardTitle>
           <p className="text-sm text-muted-foreground">Sign in to your account</p>

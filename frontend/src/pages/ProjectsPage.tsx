@@ -743,6 +743,11 @@ function WorkflowSteps({
                   </td>
                   <td className="py-1.5" onClick={(e) => e.stopPropagation()}>
                     <div className="flex items-center gap-1">
+                      {canRun && (
+                        <Button size="icon" variant="ghost" className="h-6 w-6" title="Run" onClick={() => runStep.mutate(s.id)} disabled={runStep.isPending}>
+                          <Play className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                       {canEdit && (
                         <Button size="icon" variant="ghost" className="h-6 w-6" title="Edit" onClick={() => setEditStep(s)}>
                           <Pencil className="h-3.5 w-3.5" />
@@ -1324,6 +1329,11 @@ export function ProjectsPage() {
                           </td>
                           <td className="px-4 py-2" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center gap-1">
+                              {canRun && (
+                                <Button size="icon" variant="ghost" className="h-7 w-7" title="Run" onClick={() => runWorkflow.mutate(wf.id)} disabled={runWorkflow.isPending}>
+                                  <Play className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
                               {canEdit && (
                                 <Button size="icon" variant="ghost" className="h-7 w-7" title="Edit" onClick={() => setEditWorkflow(wf)}>
                                   <Pencil className="h-3.5 w-3.5" />

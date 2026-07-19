@@ -250,6 +250,8 @@ def run_step_standalone_task(step_id: int, triggered_by_id=None, follow_outcome:
 
 
 def _maybe_notify(workflow, run):
+    from core.models import WorkflowRun
+
     try:
         if run.status == WorkflowRun.Status.SUCCESS and workflow.notify_on_success:
             send_workflow_notification(run)

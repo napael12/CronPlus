@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
-import { LayoutDashboard, FolderKanban, Variable, Users, Settings, LogOut, Clock, ChevronLeft, ChevronRight, ClipboardList } from "lucide-react";
+import { LayoutDashboard, FolderKanban, Variable, Users, Settings, LogOut, ClockPlus, ChevronLeft, ChevronRight, ClipboardList } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -41,7 +41,7 @@ export function Sidebar() {
     >
       {/* Logo + toggle */}
       <div className="flex h-14 shrink-0 items-center border-b px-3 gap-2">
-        <Clock className="h-5 w-5 text-primary shrink-0" />
+        <ClockPlus className="h-5 w-5 text-primary shrink-0" />
         {!collapsed && <span className="font-bold text-lg flex-1 truncate">CronPlus</span>}
         <button
           onClick={toggle}
