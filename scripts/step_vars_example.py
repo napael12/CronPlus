@@ -31,7 +31,7 @@ import sys
 
 def produce():
     """Emit variables for downstream steps."""
-    greeting = "hello from step 1"
+    greeting = "hello1"
     timestamp = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     artifact = os.path.join(os.getcwd(), "output.txt")
 
